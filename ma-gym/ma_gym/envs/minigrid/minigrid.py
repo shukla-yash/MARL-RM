@@ -33,7 +33,7 @@ Each agent's observation includes its:
 ACTION SPACE:
 ------------------------------------------------------------------------------------------------------------------------------
 
-{move forward, rotate 90 right, rotate 90 left, break, craft }
+{move forward, rotate 90 right, rotate 90 left, break, craft}
 
 Shortened to:
 {F, R, L, B, C}
@@ -45,6 +45,7 @@ Arguments:
     n_agents: 
     n_rocks:
     n_fires:
+    n_trees:
 
     agent_view: size of the agent view range in each direction
     full_observable: flag whether agents should receive observation for all other agents
@@ -60,8 +61,7 @@ class Minigrid(gym.Env):
 
     metadata = {'render.modes': ['human', 'rgb_array']} #must be human so it is readable data by humans
 
-    def __init__(self, grid_shape=(10, 10), n_agents=4, n_rocks=1, n_fires = 1, full_observable=True, max_steps=300, 
-                 agent_view_mask=(9, 9)):
+    def __init__(self, grid_shape=(6, 6), n_agents=2, n_rocks=0, n_fires = 14, n_trees = 1, agents_id = 'ab', goal = "T", full_observable=True, max_steps=300, agent_view_mask=(5, 5)):
         
         assert len(grid_shape) == 2, 'expected a tuple of size 2 for grid_shape, but found {}'.format(grid_shape)
         assert len(agent_view_mask) == 2, 'expected a tuple of size 2 for agent view mask,' \
@@ -88,7 +88,6 @@ class Minigrid(gym.Env):
         self.learn_step_counter = 0
         self.replace_target_cnt = self.replace
         self.observation_cntr   = 0
-        self.rocks_delay = 0
 
         self.env_name       = "minigrid"
         self.algo           = ""
@@ -101,6 +100,8 @@ class Minigrid(gym.Env):
         self.n_agents = n_agents
         self.n_rocks = n_rocks
         self.n_fires = n_fires
+        self.n_trees = n_trees
+
         
         self._max_steps = max_steps
         self._step_count = None
@@ -108,27 +109,35 @@ class Minigrid(gym.Env):
         self.agent_reward = 0
         self.agent_action = None
 
+        self.agents_id = agents_id
+        self.goal = goal
 
-        self.AGENT_COLOR = ImageColor.getcolor("green", mode='RGB')
+
+        self.AGENT_COLOR = ImageColor.getcolor("black", mode='RGB')
         self.OBSERVATION_VISUAL_COLOR = ImageColor.getcolor("gray", mode='RGB')
         self.ROCK_COLOR = ImageColor.getcolor("gray", mode='RGB')
         self.FIRE_COLOR = ImageColor.getcolor("red", mode='RGB')
+        self.TREE_COLOR = ImageColor.getcolor("green", mode='RGB')
+        # self.CRAFTING_COLOR = ImageColor.getcolor("yellow", mode='RGB')
 
         #Inital position Initilization for each object
         self._init_agent_pos = {_: None for _ in range(self.n_agents)}
         self._init_rock_pos = {_: None for _ in range(self.n_rocks)}
         self._init_fire_pos = {_: None for _ in range(self.n_fires)}
+        self._init_tree_pos = {_: None for _ in range(self.n_trees)}
 
-        self.action_space = MultiAgentActionSpace([spaces.Discrete(5) for _ in range(self.n_agents)])
-
+   
         self.agent_pos = {_: None for _ in range(self.n_agents)}
         self.rocks_pos = {_: None for _ in range(self.n_rocks)}
         self.fire_pos  = {_: None for _ in range(self.n_fires)}
+        self.tree_pos  = {_: None for _ in range(self.n_trees)}
 
         self._base_grid = self.__create_grid() 
         self._full_obs = self.__create_grid()
         self._agent_dones = [False for _ in range(self.n_agents)]
- 
+
+        self.action_space = MultiAgentActionSpace([spaces.Discrete(5) for _ in range(self.n_agents)])
+
         self.viewer = None
         self.full_observable = full_observable
 
@@ -184,10 +193,10 @@ class Minigrid(gym.Env):
             while True:
                 pos = [self.np_random.randint(0, self._base_grid_shape[0] - 1),
                        self.np_random.randint(0, self._base_grid_shape[1] - 1)]
-                if self._is_cell_vacant(pos) and (self._neighbor_agents(pos)[0] == 0):
+                if self._is_cell_vacant(pos):
                     self.rock_pos[rock_i] = pos
                     self._init_rock_pos = pos
-                break
+                    break
             self.__update_rock_view(rock_i)
 
         for fire_i in range(self.n_fires):
@@ -197,8 +206,18 @@ class Minigrid(gym.Env):
                 if self._is_cell_vacant(pos):
                     self.fire_pos[fire_i] = pos
                     self._init_fire_pos = pos
-                break
+                    break
             self.__update_fire_view(fire_i)
+
+        for tree_i in range(self.n_trees):
+            while True:
+                pos = [self.np_random.randint(0, self._base_grid_shape[0] - 1),
+                       self.np_random.randint(0, self._base_grid_shape[1] - 1)]
+                if self._is_cell_vacant(pos):
+                    self.tree_pos[tree_i] = pos
+                    self._init_tree_pos = pos
+                    break
+            self.__update_tree_view(tree_i)
 
         self.__draw_base_img()
     """
@@ -240,7 +259,8 @@ class Minigrid(gym.Env):
         self._total_episode_reward = [0 for _ in range(self.n_agents)]
         self.agent_pos = {}
         self.rock_pos = {}
-        self.fire_pos = {} 
+        self.fire_pos = {}
+        self.tree_pos = {}  
     
         self.__init_map()
         
@@ -256,32 +276,47 @@ class Minigrid(gym.Env):
     def _is_cell_vacant(self, pos):
         return self.is_valid(pos) and (self._full_obs[pos[0]][pos[1]] == PRE_IDS['empty']) 
 
+    def _is_next_pos_fire(self,pos):
+        if self._full_obs[pos[0]][pos[1]] == PRE_IDS['fire']:
+            return True
+        else:
+            return False
+
+    def _is_agent_next_to_tree(self,pos):
+        if self._full_obs[pos[0]-1][pos[1]] == PRE_IDS['tree'] or self._full_obs[pos[0]+1][pos[1]] == PRE_IDS['tree'] or self._full_obs[pos[0]][pos[1]+1] == PRE_IDS['tree'] or self._full_obs[pos[0]][pos[1]-1] == PRE_IDS['tree']:
+            return True
+        else:
+            return False
+
+            
+
     def __update_agent_pos(self, agent_i, move):
         curr_pos = copy.copy(self.agent_pos[agent_i])
         next_pos = None
 
         moves = {
-            0: [curr_pos[0], curr_pos[1]],     # Observe
+            0: [curr_pos[0]-1, curr_pos[1]],   #Move up
             1: [curr_pos[0], curr_pos[1] - 1], # move left
             2: [curr_pos[0], curr_pos[1] + 1], # move right
+            3: [curr_pos[0] + 1, curr_pos[1]], # move down
+            4: [curr_pos[0], curr_pos[1]]      #break
         }
 
         next_pos = moves[move]
+
+        if self._is_next_pos_fire(next_pos):
+            print("hit fire")
+            return True
 
         if next_pos is not None and self._is_cell_vacant(next_pos):
             self.agent_pos[agent_i] = next_pos
             self._full_obs[curr_pos[0]][curr_pos[1]] = PRE_IDS['empty']
             self.__update_resources(agent_i,move)
-   
             self.__update_agent_view(agent_i)
             self.update_agent_color([move])
 
-    def update_rock_pos(self,rock_i):
-        return
+        return False
     
-    def update_fire_pos(self,fire_i):
-        return
-
     def __update_resources(self,agent_i,action):
         return
 
@@ -290,76 +325,50 @@ class Minigrid(gym.Env):
         self._full_obs[self.agent_pos[agent_i][0]][self.agent_pos[agent_i][1]] = PRE_IDS['agent'] + str(agent_i + 1)
 
     def __update_rock_view(self, rock_i):
-        self._full_obs[self.rock_pos[rock_i][0]][self.rock_pos[rock_i][1]] = PRE_IDS['rock'] + str(rock_i + 1)
+        self._full_obs[self.rock_pos[rock_i][0]][self.rock_pos[rock_i][1]] = PRE_IDS['rock']
 
     def __update_fire_view(self, fire_i):
-        self._full_obs[self.fire_pos[fire_i][0]][self.fire_pos[fire_i][1]] = PRE_IDS['fire'] + str(fire_i + 1)
+        self._full_obs[self.fire_pos[fire_i][0]][self.fire_pos[fire_i][1]] = PRE_IDS['fire']
+
+    def __update_tree_view(self, tree_i):
+        self._full_obs[self.fire_pos[tree_i][0]][self.fire_pos[tree_i][1]] = PRE_IDS['tree']
 
 
-    """
-        Function : _neighbor_agents
-        Inputs   : pos
-        Outputs  : number of neighbors
-        Purpose  : This function is the visual of the "observation space" for each agent. This is done by putting all the squares surrounding the agent as a "neighbor" and acts like an extension of the agent. 
-    """
-    def _neighbor_agents(self, pos): # this is really just the observable space   
-        _count = 0
-        neighbors_xy = []
-
-        #Covers North, South, East, West
-        if self.is_valid([pos[0] + 1, pos[1]]) and PRE_IDS['agent'] in self._full_obs[pos[0] + 1][pos[1]]:
-            _count += 1
-            neighbors_xy.append([pos[0] + 1, pos[1]])
-        if self.is_valid([pos[0] - 1, pos[1]]) and PRE_IDS['agent'] in self._full_obs[pos[0] - 1][pos[1]]:
-            _count += 1
-            neighbors_xy.append([pos[0] - 1, pos[1]])
-        if self.is_valid([pos[0], pos[1] + 1]) and PRE_IDS['agent'] in self._full_obs[pos[0]][pos[1] + 1]:
-            _count += 1
-            neighbors_xy.append([pos[0], pos[1] + 1])
-        if self.is_valid([pos[0], pos[1] - 1]) and PRE_IDS['agent'] in self._full_obs[pos[0]][pos[1] - 1]:
-            neighbors_xy.append([pos[0], pos[1] - 1])
-            _count += 1
-
-        # #Covers NE, SE, NW, SW
-        # if self.is_valid([pos[0] + 1, pos[1] +1 ]) and PRE_IDS['agent'] in self._full_obs[pos[0] + 1][pos[1] + 1]:
-        #     _count += 1
-        #     neighbors_xy.append([pos[0] + 1, pos[1] + 1])
-        # if self.is_valid([pos[0] - 1, pos[1] - 1 ]) and PRE_IDS['agent'] in self._full_obs[pos[0] - 1][pos[1] - 1]:
-        #     _count += 1
-        #     neighbors_xy.append([pos[0] - 1, pos[1] - 1])
-        # if self.is_valid([pos[0] - 1, pos[1] + 1]) and PRE_IDS['agent'] in self._full_obs[pos[0] - 1][pos[1] + 1]:
-        #     _count += 1
-        #     neighbors_xy.append([pos[0] - 1, pos[1] + 1])
-        # if self.is_valid([pos[0] + 1, pos[1] - 1]) and PRE_IDS['agent'] in self._full_obs[pos[0] + 1][pos[1] - 1]:
-        #     neighbors_xy.append([pos[0] + 1, pos[1] - 1])
-        #     _count += 1
-
-        agent_id = []
-        for x, y in neighbors_xy:
-            agent_id.append(int(self._full_obs[x][y].split(PRE_IDS['agent'])[1]) - 1)
-        return _count, agent_id
     """
         Function : step
         Purpose  : This function returns the rewards, state, and terminal conditions for each action decision
     """   
     def step(self, agents_action):
+        rewards = [0 for _ in range(self.n_agents)]
         if (self._step_count >= self._max_steps):
             for i in range(self.n_agents):
                 self._agent_dones[i] = True
+            return self.get_agent_obs(), rewards, self._agent_dones, self.observation_cntr
 
-        for agent_i in range(self.n_agents):
-            if(self.agent_pos[0][1] >= 9):
-                self._agent_dones[agent_i] = True
-
-        rewards = [0 for _ in range(self.n_agents)]
-        in_range = 0
-        _reward = 0
-    
 
         for agent_i, action in enumerate(agents_action):
             if not (self._agent_dones[agent_i]):
-                self.__update_agent_pos(agent_i, action)
+                is_hitting_fire = self.__update_agent_pos(agent_i, action)
+                if is_hitting_fire:
+                    for i in range(self.n_agents):
+                        self._agent_dones[i] = True
+                    return self.get_agent_obs(), rewards, self._agent_dones, self.observation_cntr                    
+        if all(action == 4 for action in agents_action):
+            next_to_tree_flag = True
+            for agent_i in range(self.n_agents):
+                if self._is_agent_next_to_tree(self.agent_pos[agent_i]):
+                    next_to_tree_flag = True
+                else:
+                    next_to_tree_flag = False
+            if next_to_tree_flag:
+                #break the tree; end the episode; get a high reward 
+                rewards = [1 for _ in range(self.n_agents)]                   
+                for i in range(self.n_agents):
+                    self._agent_dones[i] = True
+                return self.get_agent_obs(), rewards, self._agent_dones, self.observation_cntr
 
+        # in_range = 0
+        # _reward = 0
         ###### INSERT REWARD FUNCTION HERE ###########
 
 
@@ -373,43 +382,8 @@ class Minigrid(gym.Env):
         
         self.agent_reward += rewards[0]
         self.agent_action = agents_action[0]
-
-
-        #update rock  and fire positions for environment
-        for rock_i in range(self.n_rocks):
-            self.update_rock_pos(rock_i)
-
-        for fire_i in range(self.n_fires):
-            self.update_fire_pos(fire_i)
          
-        print(self._full_obs)
-        print(self.get_agent_obs())
         return self.get_agent_obs(), rewards, self._agent_dones, self.observation_cntr
-
-    def __get_neighbor_coordinates(self, pos): #figures out the pos of each block of obs space
-
-        #Covers North, South, East, West
-        neighbors = []
-        if self.is_valid([pos[0] + 1, pos[1]]):
-            neighbors.append([pos[0] + 1, pos[1]])
-        if self.is_valid([pos[0] - 1, pos[1]]):
-            neighbors.append([pos[0] - 1, pos[1]])
-        if self.is_valid([pos[0], pos[1] + 1]):
-            neighbors.append([pos[0], pos[1] + 1])
-        if self.is_valid([pos[0], pos[1] - 1]):
-            neighbors.append([pos[0], pos[1] - 1])
-
-        # #Covers NE, SE, NW, SW
-        # if self.is_valid([pos[0] + 1, pos[1] +1 ]):
-        #     neighbors.append([pos[0] + 1, pos[1] +1 ])
-        # if self.is_valid([pos[0] - 1, pos[1] - 1]):
-        #     neighbors.append([pos[0] - 1, pos[1] - 1])
-        # if self.is_valid([pos[0] - 1, pos[1] + 1]):
-        #     neighbors.append([pos[0] - 1, pos[1] + 1 ])
-        # if self.is_valid([pos[0] + 1, pos[1] - 1]):
-        #     neighbors.append([pos[0] + 1, pos[1] - 1])
-     
-        return neighbors
 
     def render(self, mode='human'): #renders the entire grid world as one frame
         
@@ -429,6 +403,11 @@ class Minigrid(gym.Env):
         for fire_i in range(self.n_fires):
             draw_circle(img, self.fire_pos[fire_i], cell_size=CELL_SIZE, fill=self.FIRE_COLOR)   
             write_cell_text(img, text=str(fire_i + 1), pos=self.fire_pos[fire_i], cell_size=CELL_SIZE,
+                            fill='white', margin=0.4)
+            
+        for tree_i in range(self.n_trees):
+            draw_circle(img, self.tree_pos[tree_i], cell_size=CELL_SIZE, fill=self.TREE_COLOR)   
+            write_cell_text(img, text=str(tree_i + 1), pos=self.tree_pos[tree_i], cell_size=CELL_SIZE,
                             fill='white', margin=0.4)
 
         img = draw_score_board(img,[self.agent_reward,self.agent_action])
@@ -549,7 +528,8 @@ PRE_IDS = {
     'rock': 'R',
     'wall': 'W',
     'empty': '0',
-    'fire' : 'F'
+    'fire' : 'F',
+    'tree' : 'T'
 }
 
 OBSERVE_ID = 0
