@@ -26,10 +26,7 @@ Each agent's observation includes its:
     - Agent ID 
     - Position within the grid
     - Number of steps since beginning
-    - Battery Level |Partially empty = 3 (Takes 1 step), Half empty = 2 (Takes 2 steps), Empty = 1 (Takes 3 steps)| 
-    - Memory Level |Partially full  = 1(Takes 1 step), Half full = 2 (Takes 2 steps), Full = 3 (Takes 3 steps)|
-    - Observed Status |Partially Observed = 1 (Takes 1 step), Half Observed = 2 (Takes 2 steps), 
-                       Fully Observed = 3 (Takes 3 steps)|
+    - Full Observability of the environment
 
 ------------------------------------------------------------------------------------------------------------------------------
 
@@ -47,6 +44,7 @@ Arguments:
     grid_shape: size of the grid
     n_agents: 
     n_rocks:
+    n_fires:
 
     agent_view: size of the agent view range in each direction
     full_observable: flag whether agents should receive observation for all other agents
@@ -62,9 +60,16 @@ class Minigrid(gym.Env):
 
     metadata = {'render.modes': ['human', 'rgb_array']} #must be human so it is readable data by humans
 
-    def __init__(self, grid_shape=(10, 10), n_agents=1, n_rocks=1, full_observable=True, max_steps=300, 
+    def __init__(self, grid_shape=(10, 10), n_agents=4, n_rocks=1, n_fires = 1, full_observable=True, max_steps=300, 
                  agent_view_mask=(9, 9)):
-        ############# PARAMS #################
+        
+        assert len(grid_shape) == 2, 'expected a tuple of size 2 for grid_shape, but found {}'.format(grid_shape)
+        assert len(agent_view_mask) == 2, 'expected a tuple of size 2 for agent view mask,' \
+                                          ' but found {}'.format(agent_view_mask)
+        assert grid_shape[0] > 0 and grid_shape[1] > 0, 'grid shape should be > 0'
+        assert 0 < agent_view_mask[0] <= grid_shape[0], 'agent view mask has to be within (0,{}]'.format(grid_shape[0])
+        assert 0 < agent_view_mask[1] <= grid_shape[1], 'agent view mask has to be within (0,{}]'.format(grid_shape[1])
+        #############   PARAMS #################
         self.alpha          = 0.001 
         self.beta           = 0.002
         self.gamma          = 0.98 
@@ -92,11 +97,11 @@ class Minigrid(gym.Env):
         ############# PARAMS #################
         self._base_grid_shape = grid_shape
         self._agent_grid_shape = agent_view_mask
+
         self.n_agents = n_agents
         self.n_rocks = n_rocks
+        self.n_fires = n_fires
         
-
-
         self._max_steps = max_steps
         self._step_count = None
         self._agent_view_mask = agent_view_mask
@@ -107,13 +112,18 @@ class Minigrid(gym.Env):
         self.AGENT_COLOR = ImageColor.getcolor("green", mode='RGB')
         self.OBSERVATION_VISUAL_COLOR = ImageColor.getcolor("gray", mode='RGB')
         self.ROCK_COLOR = ImageColor.getcolor("gray", mode='RGB')
+        self.FIRE_COLOR = ImageColor.getcolor("red", mode='RGB')
 
+        #Inital position Initilization for each object
         self._init_agent_pos = {_: None for _ in range(self.n_agents)}
+        self._init_rock_pos = {_: None for _ in range(self.n_rocks)}
+        self._init_fire_pos = {_: None for _ in range(self.n_fires)}
 
         self.action_space = MultiAgentActionSpace([spaces.Discrete(5) for _ in range(self.n_agents)])
 
         self.agent_pos = {_: None for _ in range(self.n_agents)}
         self.rocks_pos = {_: None for _ in range(self.n_rocks)}
+        self.fire_pos  = {_: None for _ in range(self.n_fires)}
 
         self._base_grid = self.__create_grid() 
         self._full_obs = self.__create_grid()
@@ -161,8 +171,8 @@ class Minigrid(gym.Env):
 
         for agent_i in range(self.n_agents):
             while True:
-                pos = [self.np_random.randint(0, self._base_grid_shape[0] - 1), #for multiple agents
-                self.np_random.randint(0, self._base_grid_shape[1] - 1)]
+                pos = [self.np_random.randint(0, self._base_grid_shape[0] - 1), 
+                       self.np_random.randint(0, self._base_grid_shape[1] - 1)]
                 if self._is_cell_vacant(pos):
                     self.agent_pos[agent_i] = pos
                     self._init_agent_pos = pos
@@ -176,8 +186,19 @@ class Minigrid(gym.Env):
                        self.np_random.randint(0, self._base_grid_shape[1] - 1)]
                 if self._is_cell_vacant(pos) and (self._neighbor_agents(pos)[0] == 0):
                     self.rock_pos[rock_i] = pos
+                    self._init_rock_pos = pos
                 break
             self.__update_rock_view(rock_i)
+
+        for fire_i in range(self.n_fires):
+            while True:
+                pos = [self.np_random.randint(0, self._base_grid_shape[0] - 1),
+                       self.np_random.randint(0, self._base_grid_shape[1] - 1)]
+                if self._is_cell_vacant(pos):
+                    self.fire_pos[fire_i] = pos
+                    self._init_fire_pos = pos
+                break
+            self.__update_fire_view(fire_i)
 
         self.__draw_base_img()
     """
@@ -195,13 +216,17 @@ class Minigrid(gym.Env):
             _agent_i_obs = [pos[0] / (self._agent_grid_shape[0] - 1), pos[1] / (self._agent_grid_shape[1] - 1)]  #coordinate of agent
 
             # check if rock is in the view area and give it future (time+1) rock coordinates
-            _rock_pos = np.zeros(self._agent_view_mask)  # rock location in neighbor
+            _rock_pos = np.zeros(self._agent_view_mask)  
+            _fire_pos = np.zeros(self._agent_view_mask) # rock location in neighbor
             for row in range(max(0, pos[0] - 2), min(pos[0] + 2 + 1, self._agent_grid_shape[0] - 2)):
                 for col in range(max(0, pos[1] - 2), min(pos[1] + 2 + 1, self._agent_grid_shape[1] - 2)):
                     if PRE_IDS['rock'] in self._full_obs[row][col]:
-                        _rock_pos[row - (pos[0] - 2), col - (pos[1] - 2)] = 1  # get relative position for the prey loc.
+                        _rock_pos[row - (pos[0] - 2), col - (pos[1] - 2)] = 1  
+                    # if PRE_IDS['fire'] in self._full_obs[row][col]:
+                    #     _fire_pos[row - (pos[0] - 2), col - (pos[1] - 2)] = 1
                         #print("Observation space \n {}".format(_rock_pos))
             _agent_i_obs += _rock_pos.flatten().tolist()  # adding rock pos in observable area
+            _agent_i_obs += _fire_pos.flatten().tolist()
             _agent_i_obs += [self._step_count / self._max_steps]  # adding the time
 
             _obs.append(_agent_i_obs)
@@ -215,8 +240,11 @@ class Minigrid(gym.Env):
         self._total_episode_reward = [0 for _ in range(self.n_agents)]
         self.agent_pos = {}
         self.rock_pos = {}
+        self.fire_pos = {} 
     
         self.__init_map()
+        
+
         self._step_count = 0
         self._agent_dones = [False for _ in range(self.n_agents)]
 
@@ -234,7 +262,6 @@ class Minigrid(gym.Env):
 
         moves = {
             0: [curr_pos[0], curr_pos[1]],     # Observe
-       
             1: [curr_pos[0], curr_pos[1] - 1], # move left
             2: [curr_pos[0], curr_pos[1] + 1], # move right
         }
@@ -251,6 +278,9 @@ class Minigrid(gym.Env):
 
     def update_rock_pos(self,rock_i):
         return
+    
+    def update_fire_pos(self,fire_i):
+        return
 
     def __update_resources(self,agent_i,action):
         return
@@ -261,6 +291,10 @@ class Minigrid(gym.Env):
 
     def __update_rock_view(self, rock_i):
         self._full_obs[self.rock_pos[rock_i][0]][self.rock_pos[rock_i][1]] = PRE_IDS['rock'] + str(rock_i + 1)
+
+    def __update_fire_view(self, fire_i):
+        self._full_obs[self.fire_pos[fire_i][0]][self.fire_pos[fire_i][1]] = PRE_IDS['fire'] + str(fire_i + 1)
+
 
     """
         Function : _neighbor_agents
@@ -286,19 +320,19 @@ class Minigrid(gym.Env):
             neighbors_xy.append([pos[0], pos[1] - 1])
             _count += 1
 
-        #Covers NE, SE, NW, SW
-        if self.is_valid([pos[0] + 1, pos[1] +1 ]) and PRE_IDS['agent'] in self._full_obs[pos[0] + 1][pos[1] + 1]:
-            _count += 1
-            neighbors_xy.append([pos[0] + 1, pos[1] + 1])
-        if self.is_valid([pos[0] - 1, pos[1] - 1 ]) and PRE_IDS['agent'] in self._full_obs[pos[0] - 1][pos[1] - 1]:
-            _count += 1
-            neighbors_xy.append([pos[0] - 1, pos[1] - 1])
-        if self.is_valid([pos[0] - 1, pos[1] + 1]) and PRE_IDS['agent'] in self._full_obs[pos[0] - 1][pos[1] + 1]:
-            _count += 1
-            neighbors_xy.append([pos[0] - 1, pos[1] + 1])
-        if self.is_valid([pos[0] + 1, pos[1] - 1]) and PRE_IDS['agent'] in self._full_obs[pos[0] + 1][pos[1] - 1]:
-            neighbors_xy.append([pos[0] + 1, pos[1] - 1])
-            _count += 1
+        # #Covers NE, SE, NW, SW
+        # if self.is_valid([pos[0] + 1, pos[1] +1 ]) and PRE_IDS['agent'] in self._full_obs[pos[0] + 1][pos[1] + 1]:
+        #     _count += 1
+        #     neighbors_xy.append([pos[0] + 1, pos[1] + 1])
+        # if self.is_valid([pos[0] - 1, pos[1] - 1 ]) and PRE_IDS['agent'] in self._full_obs[pos[0] - 1][pos[1] - 1]:
+        #     _count += 1
+        #     neighbors_xy.append([pos[0] - 1, pos[1] - 1])
+        # if self.is_valid([pos[0] - 1, pos[1] + 1]) and PRE_IDS['agent'] in self._full_obs[pos[0] - 1][pos[1] + 1]:
+        #     _count += 1
+        #     neighbors_xy.append([pos[0] - 1, pos[1] + 1])
+        # if self.is_valid([pos[0] + 1, pos[1] - 1]) and PRE_IDS['agent'] in self._full_obs[pos[0] + 1][pos[1] - 1]:
+        #     neighbors_xy.append([pos[0] + 1, pos[1] - 1])
+        #     _count += 1
 
         agent_id = []
         for x, y in neighbors_xy:
@@ -320,11 +354,7 @@ class Minigrid(gym.Env):
         rewards = [0 for _ in range(self.n_agents)]
         in_range = 0
         _reward = 0
-        
-
-        for rock_i in range(self.n_rocks):# find if any rocks are in data
-            rock_neighbor_count, n_i = self._neighbor_agents(self.rock_pos[rock_i])
-            if rock_neighbor_count == 1: in_range += 1
+    
 
         for agent_i, action in enumerate(agents_action):
             if not (self._agent_dones[agent_i]):
@@ -345,9 +375,12 @@ class Minigrid(gym.Env):
         self.agent_action = agents_action[0]
 
 
-        #update rock positions for continuous environment
+        #update rock  and fire positions for environment
         for rock_i in range(self.n_rocks):
             self.update_rock_pos(rock_i)
+
+        for fire_i in range(self.n_fires):
+            self.update_fire_pos(fire_i)
          
         print(self._full_obs)
         print(self.get_agent_obs())
@@ -366,27 +399,21 @@ class Minigrid(gym.Env):
         if self.is_valid([pos[0], pos[1] - 1]):
             neighbors.append([pos[0], pos[1] - 1])
 
-        #Covers NE, SE, NW, SW
-        if self.is_valid([pos[0] + 1, pos[1] +1 ]):
-            neighbors.append([pos[0] + 1, pos[1] +1 ])
-        if self.is_valid([pos[0] - 1, pos[1] - 1]):
-            neighbors.append([pos[0] - 1, pos[1] - 1])
-        if self.is_valid([pos[0] - 1, pos[1] + 1]):
-            neighbors.append([pos[0] - 1, pos[1] + 1 ])
-        if self.is_valid([pos[0] + 1, pos[1] - 1]):
-            neighbors.append([pos[0] + 1, pos[1] - 1])
+        # #Covers NE, SE, NW, SW
+        # if self.is_valid([pos[0] + 1, pos[1] +1 ]):
+        #     neighbors.append([pos[0] + 1, pos[1] +1 ])
+        # if self.is_valid([pos[0] - 1, pos[1] - 1]):
+        #     neighbors.append([pos[0] - 1, pos[1] - 1])
+        # if self.is_valid([pos[0] - 1, pos[1] + 1]):
+        #     neighbors.append([pos[0] - 1, pos[1] + 1 ])
+        # if self.is_valid([pos[0] + 1, pos[1] - 1]):
+        #     neighbors.append([pos[0] + 1, pos[1] - 1])
      
         return neighbors
 
     def render(self, mode='human'): #renders the entire grid world as one frame
         
         img = copy.copy(self._base_img)
-        
-        #visual render for the observable area of the satellite
-        for agent_i in range(self.n_agents):
-            for neighbor in self.__get_neighbor_coordinates(self.agent_pos[agent_i]):
-                fill_cell(img, neighbor, cell_size=CELL_SIZE, fill=self.OBSERVATION_VISUAL_COLOR, margin=0.1)
-            fill_cell(img, self.agent_pos[agent_i], cell_size=CELL_SIZE, fill=self.OBSERVATION_VISUAL_COLOR, margin=0.1)
 
         #agent visual
         for agent_i in range(self.n_agents):
@@ -397,6 +424,11 @@ class Minigrid(gym.Env):
         for rock_i in range(self.n_rocks):
             draw_circle(img, self.rock_pos[rock_i], cell_size=CELL_SIZE, fill=self.ROCK_COLOR)   
             write_cell_text(img, text=str(rock_i + 1), pos=self.rock_pos[rock_i], cell_size=CELL_SIZE,
+                            fill='white', margin=0.4)
+            
+        for fire_i in range(self.n_fires):
+            draw_circle(img, self.fire_pos[fire_i], cell_size=CELL_SIZE, fill=self.FIRE_COLOR)   
+            write_cell_text(img, text=str(fire_i + 1), pos=self.fire_pos[fire_i], cell_size=CELL_SIZE,
                             fill='white', margin=0.4)
 
         img = draw_score_board(img,[self.agent_reward,self.agent_action])
@@ -516,7 +548,8 @@ PRE_IDS = {
     'agent': 'A',
     'rock': 'R',
     'wall': 'W',
-    'empty': '0'
+    'empty': '0',
+    'fire' : 'F'
 }
 
 OBSERVE_ID = 0
