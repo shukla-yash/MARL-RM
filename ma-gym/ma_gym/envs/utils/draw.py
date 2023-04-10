@@ -92,6 +92,18 @@ def draw_circle(image, pos, cell_size=50, fill='black', radius=0.3):
     ImageDraw.Draw(image).ellipse([(x, y), (x_dash, y_dash)], outline=fill, fill=fill)
 
 
+def draw_triangle(image, pos, cell_size=50, fill='black', radius=0.3):
+    cell_size_x, cell_size_y = get_cell_sizes(cell_size)
+    col, row = pos
+    row, col = row * cell_size_x, col * cell_size_y
+    gap_x, gap_y = cell_size_x * radius, cell_size_y * radius
+    x, y = row + gap_x, col + gap_y
+    x_dash, y_dash = row + cell_size_x - gap_x, col + cell_size_y - gap_y
+    x_2, y_2 = (x+x_dash)/2,(y+y_dash)/2 
+    # ImageDraw.Draw(image).ellipse([(x, y), (x_dash, y_dash)], outline=fill, fill=fill)
+    ImageDraw.Draw(image).regular_polygon(bounding_circle=(x_2,y_2,15), rotation = 0, n_sides=3, outline=fill, fill='black')
+
+
 def draw_border(image, border_width=1, fill='black'):
     width, height = image.size
     new_im = Image.new("RGB", size=(width + 2 * border_width, height + 2 * border_width), color=fill)

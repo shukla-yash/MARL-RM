@@ -15,63 +15,15 @@ for spec in env_specs:
         kwargs={'name': spec.id, **spec._kwargs}
     )
 
-# add new environments : iterate over full observability
-for i, observability in enumerate([False, True]):
-
-    for clock in [False, True]:
-        register(
-            id='Checkers-v{}'.format(i + (2 if clock else 0)),
-            entry_point='ma_gym.envs.checkers:Checkers',
-            kwargs={'full_observable': observability, 'step_cost': -0.01, 'clock': clock}
-        )
-        register(
-            id='Switch2-v{}'.format(i + (2 if clock else 0)),
-            entry_point='ma_gym.envs.switch:Switch',
-            kwargs={'n_agents': 2, 'full_observable': observability, 'step_cost': -0.1, 'clock': clock}
-        )
-        register(
-            id='Switch4-v{}'.format(i + (2 if clock else 0)),
-            entry_point='ma_gym.envs.switch:Switch',
-            kwargs={'n_agents': 4, 'full_observable': observability, 'step_cost': -0.1, 'clock': clock}
-        )
-
-    for num_max_cars in [4, 10]:
-        register(
-            id='TrafficJunction{}-v'.format(num_max_cars) + str(i),
-            entry_point='ma_gym.envs.traffic_junction:TrafficJunction',
-            kwargs={'full_observable': observability, 'n_max': num_max_cars}
-        )
-
-    register(
-        id='Lumberjacks-v' + str(i),
-        entry_point='ma_gym.envs.lumberjacks:Lumberjacks',
-        kwargs={'full_observable': observability}
-    )
-    # Adding in Satellite Environment
-    register(
-        id='Satellite-v' + str(i),
-        entry_point='ma_gym.envs.satellite:Satellites',
-        kwargs={'full_observable': observability}
-    )
-
-    register(
-        id='Satellite2-v' + str(i),
-        entry_point='ma_gym.envs.satellite2:Satellites2',
-        kwargs={'full_observable': observability}
-    )
-    register(
-        id='minigrid-v' + str(i),
-        entry_point='ma_gym.envs.minigrid:Minigrid',
-        kwargs={'full_observable': observability}
-    )
 
 register(
-    id='Combat-v0',
-    entry_point='ma_gym.envs.combat:Combat',
+    id='minigridTree-v0',
+    entry_point='ma_gym.envs.minigrid:MinigridTree'
 )
+
 register(
-    id='PongDuel-v0',
-    entry_point='ma_gym.envs.pong_duel:PongDuel',
+    id='minigridRock-v0',
+    entry_point='ma_gym.envs.minigrid:MinigridRock'
 )
 
 for game_info in [[(20, 20), 2, 30], [(7, 7), 4, 2]]:  # [(grid_shape, predator_n, prey_n),..]

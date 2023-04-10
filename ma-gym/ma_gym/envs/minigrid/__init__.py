@@ -1,1 +1,2 @@
-from .minigrid import Minigrid
+from .minigridTree import MinigridTree
+from .minigridRock import MinigridRock
