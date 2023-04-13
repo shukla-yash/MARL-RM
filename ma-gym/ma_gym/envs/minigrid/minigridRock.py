@@ -12,16 +12,12 @@ from gym.utils import seeding
 from ..utils.action_space import MultiAgentActionSpace
 from ..utils.draw import draw_grid, fill_cell, draw_circle, write_cell_text, draw_score_board
 from ..utils.observation_space import MultiAgentObservationSpace
-from ..utils.replay_buffer import ReplayBuffer
-from ..utils.deep_q_network import DeepQNetwork
+
 
 """
 Minigrid Environment for Automata Project with multi-agent systems.
 
 LIMITATIONS OF AGENT/S:
-
-
-
 Each agent's observation includes its:
     - Agent ID 
     - Position within the grid
@@ -33,7 +29,7 @@ Each agent's observation includes its:
 ACTION SPACE:
 ------------------------------------------------------------------------------------------------------------------------------
 
-{move forward, rotate 90 right, rotate 90 left, break, craft}
+{move forward, move left, move right, break, craft}
 
 Shortened to:
 {F, R, L, B, C}
@@ -61,7 +57,7 @@ class MinigridRock(gym.Env):
 
     metadata = {'render.modes': ['human', 'rgb_array']} #must be human so it is readable data by humans
 
-    def __init__(self, grid_shape=(6, 6), n_agents=2, n_rocks=1, n_fires = 2, n_trees = 0, agents_id = 'ab', goal = "T", full_observable=True, max_steps=30000000, agent_view_mask=(5, 5)):
+    def __init__(self, grid_shape=(10, 10), n_agents=2, n_rocks=1, n_fires = 5, n_trees = 1, agents_id = 'ab', goal = "T", full_observable=True, max_steps=300, agent_view_mask=(10,10)):
         
         assert len(grid_shape) == 2, 'expected a tuple of size 2 for grid_shape, but found {}'.format(grid_shape)
         assert len(agent_view_mask) == 2, 'expected a tuple of size 2 for agent view mask,' \
@@ -69,29 +65,6 @@ class MinigridRock(gym.Env):
         assert grid_shape[0] > 0 and grid_shape[1] > 0, 'grid shape should be > 0'
         assert 0 < agent_view_mask[0] <= grid_shape[0], 'agent view mask has to be within (0,{}]'.format(grid_shape[0])
         assert 0 < agent_view_mask[1] <= grid_shape[1], 'agent view mask has to be within (0,{}]'.format(grid_shape[1])
-        #############   PARAMS #################
-        self.alpha          = 0.001 
-        self.beta           = 0.002
-        self.gamma          = 0.98 
-        self.epsilon        = 1
-        self.eps_min        = 0.01
-        self.eps_dec        = 1e-5
-        self.lr             = 0.001
-        self.input_dims     = [105]
-        self.n_actions      = 5
-        self.mem_size       = 10000
-        self.batch_size     = 64
-        self.mem_cntr       = 0
-        self.replace        = 1000
-        self.iter_cntr      = 0
-
-        self.learn_step_counter = 0
-        self.replace_target_cnt = self.replace
-        self.observation_cntr   = 0
-
-        self.env_name       = "minigrid"
-        self.algo           = ""
-        self.checkpoint_dir = 'examples/checkpoints'
 
         ############# PARAMS #################
         self._base_grid_shape = grid_shape
@@ -102,7 +75,6 @@ class MinigridRock(gym.Env):
         self.n_fires = n_fires
         self.n_trees = n_trees
 
-        
         self._max_steps = max_steps
         self._step_count = None
         self._agent_view_mask = agent_view_mask
@@ -111,13 +83,16 @@ class MinigridRock(gym.Env):
 
         self.agents_id = agents_id
         self.goal = goal
+        self.observation_cntr = 0
 
-
-        self.AGENT_COLOR = ImageColor.getcolor("black", mode='RGB')
+        self.AGENT_COLOR = ImageColor.getcolor("blue", mode='RGB')
         self.OBSERVATION_VISUAL_COLOR = ImageColor.getcolor("gray", mode='RGB')
         self.ROCK_COLOR = ImageColor.getcolor("gray", mode='RGB')
         self.FIRE_COLOR = ImageColor.getcolor("red", mode='RGB')
         self.TREE_COLOR = ImageColor.getcolor("green", mode='RGB')
+        self.WALL_COLOR = ImageColor.getcolor("black", mode='RGB')
+        self.DEBRIS_COLOR = ImageColor.getcolor("saddlebrown", mode='RGB')
+
         # self.CRAFTING_COLOR = ImageColor.getcolor("yellow", mode='RGB')
 
         #Inital position Initilization for each object
@@ -125,12 +100,6 @@ class MinigridRock(gym.Env):
         self._init_rock_pos = {_: None for _ in range(self.n_rocks)}
         self._init_fire_pos = {_: None for _ in range(self.n_fires)}
         self._init_tree_pos = {_: None for _ in range(self.n_trees)}
-
-   
-        self.agent_pos = {_: None for _ in range(self.n_agents)}
-        self.rocks_pos = {_: None for _ in range(self.n_rocks)}
-        self.fire_pos  = {_: None for _ in range(self.n_fires)}
-        self.tree_pos  = {_: None for _ in range(self.n_trees)}
 
         self._base_grid = self.__create_grid() 
         self._full_obs = self.__create_grid()
@@ -142,8 +111,9 @@ class MinigridRock(gym.Env):
         self.full_observable = full_observable
 
         mask_size = np.prod(self._agent_view_mask)
-        self._obs_high = np.array([1., 1.] + [1.] * mask_size + [1.0], dtype=np.float32)
-        self._obs_low  = np.array([0., 0.] + [0.] * mask_size + [0.0], dtype=np.float32)
+
+        self._obs_high = np.array([5]*mask_size + 2*[5.0], dtype=np.float32)
+        self._obs_low  = np.array([0]*mask_size + 2*[0.0], dtype=np.float32)
         if self.full_observable:
             self._obs_high = np.tile(self._obs_high, self.n_agents)
             self._obs_low = np.tile(self._obs_low, self.n_agents)
@@ -158,12 +128,12 @@ class MinigridRock(gym.Env):
         Outputs : None
         Purpose : Reports back what move agent/user chose
     """
-    def get_action_meanings(self, agent_i=None):
-        if agent_i is not None:
-            assert agent_i <= self.n_agents
-            return [ACTION_MEANING[i] for i in range(self.action_space[agent_i].n)]
-        else:
-            return [[ACTION_MEANING[i] for i in range(ac.n)] for ac in self.action_space]
+    # def get_action_meanings(self, agent_i=None):
+    #     if agent_i is not None:
+    #         assert agent_i <= self.n_agents
+    #         return [ACTION_MEANING[i] for i in range(self.action_space[agent_i].n)]
+    #     else:
+    #         return [[ACTION_MEANING[i] for i in range(ac.n)] for ac in self.action_space]
 
     def sample_action_space(self): # only for eps-greedy action  
         return [agent_action_space.sample() for agent_action_space in self.action_space]
@@ -175,13 +145,49 @@ class MinigridRock(gym.Env):
         _grid = [[PRE_IDS['empty'] for _ in range(self._base_grid_shape[1])] for row in range(self._base_grid_shape[0])]
         return _grid
 
+    def reset(self):
+        self._total_episode_reward = [0 for _ in range(self.n_agents)]
+        self.agent_pos = {}
+        self.rock_pos = {}
+        self.fire_pos = {}
+        self.tree_pos = {}  
+        self.wall_pos = {}
+        self.debris_pos = {}
+
+        self.__init_map()
+        
+        self.inventory = {'tree': 0, 'rock':0}
+        self._step_count = 0
+        self._agent_dones = [False for _ in range(self.n_agents)]
+
+        return self.get_agent_obs()
+
     def __init_map(self):
         self._full_obs = self.__create_grid()
+        
+        pos = [[int(self._base_grid_shape[0]/2),int(self._base_grid_shape[0]/2)-3],[int(self._base_grid_shape[0]/2),int(self._base_grid_shape[0]/2)-2],[int(self._base_grid_shape[0]/2),int(self._base_grid_shape[0]/2)+2],[int(self._base_grid_shape[0]/2),int(self._base_grid_shape[0]/2)+3]]
+        self.n_debris = len(pos)
+        debris_counter = 0
+        for p in pos:
+            if self._is_cell_vacant(p):
+                self.debris_pos[debris_counter] = p
+            self.__update_debris_view(debris_counter)                    
+            debris_counter += 1
+
+        wall_counter = 0
+        for col in range(self._base_grid_shape[0]):
+            pos = [int(self._base_grid_shape[0]/2),col]
+            if self._is_cell_vacant(pos):
+                self.wall_pos[wall_counter] = pos
+                self.__update_wall_view(wall_counter)                    
+                wall_counter+= 1
+
+        self.n_walls = wall_counter
 
         for agent_i in range(self.n_agents):
             while True:
-                pos = [self.np_random.randint(0, self._base_grid_shape[0] - 1), 
-                       self.np_random.randint(0, self._base_grid_shape[1] - 1)]
+                pos = [self.np_random.randint(0, self._base_grid_shape[0]/2 - 1), 
+                       self.np_random.randint(0, self._base_grid_shape[1]/2 - 1)]
                 if self._is_cell_vacant(pos):
                     self.agent_pos[agent_i] = pos
                     self._init_agent_pos = pos
@@ -191,8 +197,8 @@ class MinigridRock(gym.Env):
      
         for rock_i in range(self.n_rocks):
             while True:
-                pos = [self.np_random.randint(0, self._base_grid_shape[0] - 1),
-                       self.np_random.randint(0, self._base_grid_shape[1] - 1)]
+                pos = [self.np_random.randint(0, self._base_grid_shape[0]/2 - 1),
+                       self.np_random.randint(0, self._base_grid_shape[1]/2 - 1)]
                 if self._is_cell_vacant(pos):
                     self.rock_pos[rock_i] = pos
                     self._init_rock_pos = pos
@@ -203,7 +209,8 @@ class MinigridRock(gym.Env):
             while True:
                 pos = [self.np_random.randint(0, self._base_grid_shape[0] - 1),
                        self.np_random.randint(0, self._base_grid_shape[1] - 1)]
-                if self._is_cell_vacant(pos):
+                if self._is_cell_vacant(pos) and not pos[0] == int(self._base_grid_shape[0]/2)-1 and not pos[1] == int(self._base_grid_shape[0]/2)-3 \
+                      and not pos[1] == int(self._base_grid_shape[0]/2)-2 and not pos[1] == int(self._base_grid_shape[0]/2)+3 and not pos[1] == int(self._base_grid_shape[0]/2)+2:
                     self.fire_pos[fire_i] = pos
                     self._init_fire_pos = pos
                     break
@@ -211,13 +218,15 @@ class MinigridRock(gym.Env):
 
         for tree_i in range(self.n_trees):
             while True:
-                pos = [self.np_random.randint(0, self._base_grid_shape[0] - 1),
-                       self.np_random.randint(0, self._base_grid_shape[1] - 1)]
+                pos = [self.np_random.randint(0, self._base_grid_shape[0]/2 - 1),
+                       self.np_random.randint(0, self._base_grid_shape[1]/2 - 1)]
                 if self._is_cell_vacant(pos):
                     self.tree_pos[tree_i] = pos
                     self._init_tree_pos = pos
                     break
             self.__update_tree_view(tree_i)
+
+
 
         self.__draw_base_img()
     """
@@ -226,69 +235,90 @@ class MinigridRock(gym.Env):
         Outputs  : full observation of the grid world
         Purpose  : 
     """
+    # def get_agent_obs(self):
+    #     _obs = []
+    #     for agent_i in range(self.n_agents):
+    #         pos = self.agent_pos[agent_i]
+    #         # print("Agent Pos: {}".format(pos))
+
+    #         _agent_i_obs = [pos[0] / (self._agent_grid_shape[0] - 1), pos[1] / (self._agent_grid_shape[1] - 1)]  #coordinate of agent
+
+    #         # check if rock is in the view area and give it future (time+1) rock coordinates
+    #         _rock_pos = np.zeros(self._agent_view_mask)  
+    #         _fire_pos = np.zeros(self._agent_view_mask) # rock location in neighbor
+    #         for row in range(max(0, pos[0] - 2), min(pos[0] + 2 + 1, self._agent_grid_shape[0] - 2)):
+    #             for col in range(max(0, pos[1] - 2), min(pos[1] + 2 + 1, self._agent_grid_shape[1] - 2)):
+    #                 if PRE_IDS['rock'] in self._full_obs[row][col]:
+    #                     _rock_pos[row - (pos[0] - 2), col - (pos[1] - 2)] = 1  
+
+    #         _agent_i_obs += _rock_pos.flatten().tolist()  # adding rock pos in observable area
+    #         _agent_i_obs += _fire_pos.flatten().tolist()
+    #         _agent_i_obs += [self._step_count / self._max_steps]  # adding the time
+
+    #         _obs.append(_agent_i_obs)
+
+    #     if self.full_observable:
+    #         _obs = np.array(_obs).flatten().tolist() # flatten to np array 
+    #         _obs = [_obs for _ in range(self.n_agents)]
+    #     return _obs
+
     def get_agent_obs(self):
         _obs = []
         for agent_i in range(self.n_agents):
-            pos = self.agent_pos[agent_i]
-            # print("Agent Pos: {}".format(pos))
-
-            _agent_i_obs = [pos[0] / (self._agent_grid_shape[0] - 1), pos[1] / (self._agent_grid_shape[1] - 1)]  #coordinate of agent
-
-            # check if rock is in the view area and give it future (time+1) rock coordinates
-            _rock_pos = np.zeros(self._agent_view_mask)  
-            _fire_pos = np.zeros(self._agent_view_mask) # rock location in neighbor
-            for row in range(max(0, pos[0] - 2), min(pos[0] + 2 + 1, self._agent_grid_shape[0] - 2)):
-                for col in range(max(0, pos[1] - 2), min(pos[1] + 2 + 1, self._agent_grid_shape[1] - 2)):
-                    if PRE_IDS['rock'] in self._full_obs[row][col]:
-                        _rock_pos[row - (pos[0] - 2), col - (pos[1] - 2)] = 1  
-                    # if PRE_IDS['fire'] in self._full_obs[row][col]:
-                    #     _fire_pos[row - (pos[0] - 2), col - (pos[1] - 2)] = 1
-                        #print("Observation space \n {}".format(_rock_pos))
-            _agent_i_obs += _rock_pos.flatten().tolist()  # adding rock pos in observable area
-            _agent_i_obs += _fire_pos.flatten().tolist()
-            _agent_i_obs += [self._step_count / self._max_steps]  # adding the time
-
-            _obs.append(_agent_i_obs)
-
+            for row in range(len(self._full_obs[0])):
+                for col in range(len(self._full_obs[1])):
+                    _obs.append(self._full_obs[row][col])
+            _obs.append(self.inventory['tree'])
+            _obs.append(self.inventory['rock'])
         if self.full_observable:
             _obs = np.array(_obs).flatten().tolist() # flatten to np array 
             _obs = [_obs for _ in range(self.n_agents)]
         return _obs
 
-    def reset(self):
-        self._total_episode_reward = [0 for _ in range(self.n_agents)]
-        self.agent_pos = {}
-        self.rock_pos = {}
-        self.fire_pos = {}
-        self.tree_pos = {}  
-    
-        self.__init_map()
-        
-
-        self._step_count = 0
-        self._agent_dones = [False for _ in range(self.n_agents)]
-
-        return self.get_agent_obs()
-
     def is_valid(self, pos):
         return (0 <= pos[0] < self._agent_grid_shape[0]) and (0 <= pos[1] < self._agent_grid_shape[1])
 
     def _is_cell_vacant(self, pos):
-        return self.is_valid(pos) and (self._full_obs[pos[0]][pos[1]] == PRE_IDS['empty']) 
+        if self.is_valid(pos):
+            return (self._full_obs[pos[0]][pos[1]] == PRE_IDS['empty']) 
 
     def _is_next_pos_fire(self,pos):
-        if self._full_obs[pos[0]][pos[1]] == PRE_IDS['fire']:
-            return True
-        else:
-            return False
+        if self.is_valid(pos):
+            if self._full_obs[pos[0]][pos[1]] == PRE_IDS['fire']:
+                return True
+        return False
+
+    def _is_next_pos_debris(self,pos):
+        if self.is_valid(pos):
+            if self._full_obs[pos[0]][pos[1]] == PRE_IDS['debris']:
+                return True
+        return False
+
+    def _is_next_pos_wall(self,pos):
+        if self.is_valid(pos):
+            if self._full_obs[pos[0]][pos[1]] == PRE_IDS['wall']:
+                return True
+        return False
 
     def _is_agent_next_to_tree(self,pos):
-        if self._full_obs[pos[0]-1][pos[1]] == PRE_IDS['tree'] or self._full_obs[pos[0]+1][pos[1]] == PRE_IDS['tree'] or self._full_obs[pos[0]][pos[1]+1] == PRE_IDS['tree'] or self._full_obs[pos[0]][pos[1]-1] == PRE_IDS['tree']:
-            return True
-        else:
-            return False
+        next_to_tree = False
+        which_tree = []
+        for tree_i in self.tree_pos:
+            # print(self.tree_pos[tree_i])
+            if [pos[0]-1,pos[1]] == self.tree_pos[tree_i] or [pos[0]+1,pos[1]] == self.tree_pos[tree_i] or [pos[0],pos[1]+1] == self.tree_pos[tree_i] or [pos[0],pos[1]-1] == self.tree_pos[tree_i]:            
+                next_to_tree = True
+                which_tree.append(self.tree_pos[tree_i])
+        return next_to_tree, which_tree
 
-            
+    def _is_agent_next_to_rock(self,pos):
+        next_to_rock = False
+        which_rock = []
+        for rock_i in self.rock_pos:
+            # print(self.rock_pos[rock_i])
+            if [pos[0]-1,pos[1]] == self.rock_pos[rock_i] or [pos[0]+1,pos[1]] == self.rock_pos[rock_i] or [pos[0],pos[1]+1] == self.rock_pos[rock_i] or [pos[0],pos[1]-1] == self.rock_pos[rock_i]:            
+                next_to_rock = True
+                which_rock.append(self.rock_pos[rock_i])
+        return next_to_rock, which_rock
 
     def __update_agent_pos(self, agent_i, move):
         curr_pos = copy.copy(self.agent_pos[agent_i])
@@ -305,24 +335,20 @@ class MinigridRock(gym.Env):
         next_pos = moves[move]
 
         if self._is_next_pos_fire(next_pos):
-            print("hit fire")
+            # print("hit fire")
             return True
 
         if next_pos is not None and self._is_cell_vacant(next_pos):
             self.agent_pos[agent_i] = next_pos
             self._full_obs[curr_pos[0]][curr_pos[1]] = PRE_IDS['empty']
-            self.__update_resources(agent_i,move)
             self.__update_agent_view(agent_i)
-            self.update_agent_color([move])
+            # self.update_agent_color([move])
 
         return False
-    
-    def __update_resources(self,agent_i,action):
-        return
 
 
     def __update_agent_view(self, agent_i):
-        self._full_obs[self.agent_pos[agent_i][0]][self.agent_pos[agent_i][1]] = PRE_IDS['agent'] + str(agent_i + 1)
+        self._full_obs[self.agent_pos[agent_i][0]][self.agent_pos[agent_i][1]] = PRE_IDS['agent'] + agent_i
 
     def __update_rock_view(self, rock_i):
         self._full_obs[self.rock_pos[rock_i][0]][self.rock_pos[rock_i][1]] = PRE_IDS['rock']
@@ -332,6 +358,16 @@ class MinigridRock(gym.Env):
 
     def __update_tree_view(self, tree_i):
         self._full_obs[self.tree_pos[tree_i][0]][self.tree_pos[tree_i][1]] = PRE_IDS['tree']
+
+    def __update_debris_view(self, debris_i):
+        self._full_obs[self.debris_pos[debris_i][0]][self.debris_pos[debris_i][1]] = PRE_IDS['debris']
+
+    def __update_wall_view(self, wall_i):
+        self._full_obs[self.wall_pos[wall_i][0]][self.wall_pos[wall_i][1]] = PRE_IDS['wall']
+
+
+    def __delete_item(self, pos):
+        self._full_obs[pos[0]][pos[1]] = PRE_IDS['empty']
 
 
     """
@@ -345,7 +381,6 @@ class MinigridRock(gym.Env):
                 self._agent_dones[i] = True
             return self.get_agent_obs(), rewards, self._agent_dones, self.observation_cntr
 
-
         for agent_i, action in enumerate(agents_action):
             if not (self._agent_dones[agent_i]):
                 is_hitting_fire = self.__update_agent_pos(agent_i, action)
@@ -353,37 +388,40 @@ class MinigridRock(gym.Env):
                     for i in range(self.n_agents):
                         self._agent_dones[i] = True
                     return self.get_agent_obs(), rewards, self._agent_dones, self.observation_cntr                    
-        if all(action == 4 for action in agents_action):
-            next_to_tree_flag = True
-            for agent_i in range(self.n_agents):
-                if self._is_agent_next_to_tree(self.agent_pos[agent_i]):
-                    next_to_tree_flag = True
-                else:
-                    next_to_tree_flag = False
-            if next_to_tree_flag:
-                #break the tree; end the episode; get a high reward 
+        if all(action == 5 for action in agents_action):
+            item_breakable, pos = self._check_if_item_breakable()
+            if item_breakable:
+                self.inventory['rock'] += 1 
+                self.__delete_item(pos)
                 rewards = [1 for _ in range(self.n_agents)]                   
                 for i in range(self.n_agents):
                     self._agent_dones[i] = True
                 return self.get_agent_obs(), rewards, self._agent_dones, self.observation_cntr
 
-        # in_range = 0
-        # _reward = 0
-        ###### INSERT REWARD FUNCTION HERE ###########
-
-
-        ###### INSERT REWARD FUNCTION HERE ###########
-
-
-        for i in range(self.n_agents):
-            self._total_episode_reward[i] += rewards[i]
-
         self._step_count += 1
-        
-        self.agent_reward += rewards[0]
-        self.agent_action = agents_action[0]
          
         return self.get_agent_obs(), rewards, self._agent_dones, self.observation_cntr
+
+    def _check_if_item_breakable(self):
+            next_to_rock_flag = False
+            which_rock_old = []
+            which_rock_new = []
+            which_rock = None
+            for agent_i in range(self.n_agents):
+                next_rock, which_rock_new =  self._is_agent_next_to_rock(self.agent_pos[agent_i])
+                if next_rock and len(which_rock_new)>0:
+                    if len(which_rock_old) == 0:
+                        which_rock_old = which_rock_new
+                    else:
+                        for which_rock_i in which_rock_old:
+                            if which_rock_i in which_rock_new:
+                                next_to_rock_flag = True
+                                which_rock = which_rock_i
+                                break
+                else:
+                    next_to_rock_flag = False
+                    return False, None
+            return next_to_rock_flag, which_rock
 
     def render(self, mode='human'): #renders the entire grid world as one frame
         
@@ -410,7 +448,17 @@ class MinigridRock(gym.Env):
             write_cell_text(img, text=str(tree_i + 1), pos=self.tree_pos[tree_i], cell_size=CELL_SIZE,
                             fill='white', margin=0.4)
 
-        img = draw_score_board(img,[self.agent_reward,self.agent_action])
+        for debris_i in range(self.n_debris):
+            draw_circle(img, self.debris_pos[debris_i], cell_size=CELL_SIZE, fill=self.DEBRIS_COLOR)   
+            write_cell_text(img, text=str(debris_i + 1), pos=self.debris_pos[debris_i], cell_size=CELL_SIZE,
+                            fill='white', margin=0.4)
+
+        for wall_i in range(self.n_walls):
+            draw_circle(img, self.wall_pos[wall_i], cell_size=CELL_SIZE, fill=self.WALL_COLOR)   
+            write_cell_text(img, text=str(wall_i + 1), pos=self.wall_pos[wall_i], cell_size=CELL_SIZE,
+                            fill='white', margin=0.4)
+
+        # img = draw_score_board(img,[self.agent_reward,self.agent_action])
         img = np.asarray(img)
         if mode == 'rgb_array':
             return img
@@ -430,110 +478,35 @@ class MinigridRock(gym.Env):
             self.viewer.close()
             self.viewer = None
 
-    def update_agent_color(self,action):
-        action = action[0]
-        if(action == OBSERVE_ID):
-            self.AGENT_COLOR = ImageColor.getcolor("purple", mode='RGB')
-            self.OBSERVATION_VISUAL_COLOR = ImageColor.getcolor("purple", mode='RGB')
-        if(action == LEFT_ID):
-            self.AGENT_COLOR = ImageColor.getcolor("red", mode='RGB')
-            self.OBSERVATION_VISUAL_COLOR = ImageColor.getcolor("red", mode='RGB')
-        if(action == RIGHT_ID):
-            self.AGENT_COLOR = ImageColor.getcolor("orange", mode='RGB')
-            self.OBSERVATION_VISUAL_COLOR = ImageColor.getcolor("orange", mode='RGB')
-        if(action == BREAK_ID):
-            self.AGENT_COLOR = ImageColor.getcolor("black", mode='RGB')
-            self.OBSERVATION_VISUAL_COLOR = ImageColor.getcolor("black", mode='RGB')
-        if(action == CRAFT_ID):
-            self.AGENT_COLOR = ImageColor.getcolor("green", mode='RGB')
-            self.OBSERVATION_VISUAL_COLOR = ImageColor.getcolor("green", mode='RGB')
-            
-    def save_models(self):
-        self.q_eval.save_checkpoint()
-        # self.q_next.save_checkpoint()
-
-    def load_models(self):
-        self.q_eval.load_checkpoint()
-        # self.q_next.load_checkpoint()
-
-    def remember(self, state, action, reward, new_state, done):
-        self.memory.store_transition(state, action, reward, new_state, done)
-
-    def choose_action(self, observation, evaluate=False): #epsilon-greedy action selection
-        if np.random.random() > self.epsilon:
-            state_i = T.tensor(observation[0],dtype=T.float).to(self.q_eval.device)
-            actions = self.q_eval.forward(state_i)
-            action = T.argmax(actions).item() # π∗(s) = argamax​ Q∗(s,a)
-            action = [action]
-        else:
-            action = self.sample_action_space()
-        return action
-
-    def decrement_epsilon(self):
-        self.epsilon = self.epsilon - self.eps_dec \
-                        if self.epsilon > self.eps_min else self.eps_min
-    def learn(self):
-
-        if self.memory.mem_cntr < self.batch_size:
-            return
-
-        self.q_eval.optimizer.zero_grad()
-
-        state, action, reward, new_state, done, batch = \
-                                self.memory.sample_buffer(self.batch_size) # sample batch from experience
-
-        state = T.tensor(state).to(self.q_eval.device)
-        new_state = T.tensor(new_state).to(self.q_eval.device)
-        action = action
-        rewards = T.tensor(reward).to(self.q_eval.device)
-        dones = T.tensor(done).to(self.q_eval.device)
-        batch_index = np.arange(self.batch_size, dtype=np.int32)
-
-        q_eval = self.q_eval.forward(state)[batch_index,action] #Q_t
-        q_next = self.q_eval.forward(new_state)  # Q_t+1
-        q_next[dones] = 0.0
-
-        q_target = rewards + self.gamma*T.max(q_next, dim=1)[0] # Qπ(s,a) = r + γQπ(s′,π(s′))
-        q_target = q_target.float() # turn to float to match datatypes of all tensors
-
-
-        loss = self.q_eval.loss(q_target, q_eval).to(self.q_eval.device) # Mean Squared Error Loss
-        loss.backward()
-        
-        self.q_eval.optimizer.step()
-
-        self.iter_cntr += 1
-        self.epsilon = self.epsilon - self.eps_dec \
-            if self.epsilon > self.eps_min else self.eps_min #explore vs exploit
-
-
-logger = logging.getLogger(__name__)
-
 CELL_SIZE = 35
 WALL_COLOR = 'white'
 
-ACTION_MEANING = {
-    0: "O", # Make purple
-
-    1: "L", # Make red
-    2: "R", # Make orange
-
-    3: "B", # Make black
-    4: "C", # Make green
-}
-
 #sep. actions for observing and slewing 
-PRE_IDS = {
-    'agent': 'A',
-    'rock': 'R',
-    'wall': 'W',
-    'empty': '0',
-    'fire' : 'F',
-    'tree' : 'T'
-}
+# PRE_IDS = {
+#     'agent': 'A',
+#     'rock': 'R',
+#     'wall': 'W',
+#     'empty': '0',
+#     'fire' : 'F',
+#     'tree' : 'T'
+# }
 
-OBSERVE_ID = 0
-LEFT_ID = 1
-RIGHT_ID = 2
-BREAK_ID = 3
-CRAFT_ID = 4
+# PRE_IDS = {
+#     'agent': '4',
+#     'rock': '1',
+#     'wall': 'W',
+#     'empty': '0',
+#     'fire' : '3',
+#     'tree' : '2'
+# }
+
+PRE_IDS = {
+    'agent': 6,
+    'rock': 1,
+    'wall': 4,
+    'empty': 0,
+    'fire' : 3,
+    'tree' : 2,
+    'debris':5
+
+}
